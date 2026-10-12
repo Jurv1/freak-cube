@@ -1,0 +1,5 @@
+build/*
+!build/.gitkeep
+*.rbxl.lock
+*.rbxlx.lock
+.claude/
