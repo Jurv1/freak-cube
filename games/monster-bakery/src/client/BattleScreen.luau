@@ -22,6 +22,10 @@ local BLUE = Color3.fromRGB(150, 220, 255)
 local IMPACT_DELAY = 0.3 -- через сколько после названия скилла падает здоровье
 local START_TIMEOUT = 4
 local CAMERA_BINDING = "BakeryBattleCamera"
+local MATCHUP_SIGN = 0.15 -- с какого расклада на карточке команды появляется стрелка
+-- ⬆ и ⬇ рисуются толстой стрелкой и красятся цветом текста; ▲ выходит мелким, ➜ не рисуется вовсе
+local ARROWS = { [2] = "⬆⬆", [1] = "⬆", [-1] = "⬇", [-2] = "⬇⬇" }
+local WHEEL_RADIUS = 105
 
 type FighterView = {
 	key: string,
@@ -47,6 +51,7 @@ export type Context = {
 }
 
 type CardView = { frame: Frame, name: TextLabel, status: TextLabel, fill: Frame, hp: TextLabel, dots: { Frame } }
+type TeamCard = { button: TextButton, badge: TextLabel, sign: TextLabel }
 type SkillButton = {
 	button: TextButton,
 	icon: TextLabel,
@@ -62,9 +67,14 @@ local BattleScreen = {}
 BattleScreen.refresh = function() end
 BattleScreen.closePanel = function() end
 
-local function typeIcons(key: string): string
-	local recipe = GameData.Recipes[key]
-	return GameData.IngredientById[recipe.a].emoji .. GameData.IngredientById[recipe.b].emoji
+-- Значки типов для надписи с RichText: основной тип крупно, подтип мельче справа
+local function typeIcons(key: string, mainSize: number, subSize: number): string
+	local main, sub = BattleRules.types(key)
+	local text = string.format('<font size="%d">%s</font>', mainSize, GameData.IngredientById[main].emoji)
+	if sub then
+		text ..= string.format('<font size="%d">%s</font>', subSize, GameData.IngredientById[sub].emoji)
+	end
+	return text
 end
 
 local function fighterName(fighter: FighterView): string
@@ -137,6 +147,7 @@ function BattleScreen.init(context: Context)
 	}, panel)
 	make("UIListLayout", {
 		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
 		Padding = UDim.new(0, 9),
 		SortOrder = Enum.SortOrder.LayoutOrder,
 	}, foeRow)
@@ -145,17 +156,31 @@ function BattleScreen.init(context: Context)
 		local card = make("TextLabel", {
 			Name = "Foe" .. index,
 			LayoutOrder = index,
-			Size = UDim2.fromOffset(184, 64),
+			Size = UDim2.fromOffset(167, 64),
 			BackgroundColor3 = Ui.DARK,
 			Font = FONT,
 			TextSize = 14,
 			TextWrapped = true,
+			RichText = true,
 			TextColor3 = Ui.WHITE,
 			Text = "",
 		}, foeRow)
 		round(card, 10)
 		foeCards[index] = card
 	end
+
+	-- Не в углу экрана: там кнопки самого Roblox
+	local wheelButton = make("TextButton", {
+		Name = "Wheel",
+		LayoutOrder = GameData.TEAM_SIZE + 1,
+		Size = UDim2.fromOffset(42, 42),
+		BackgroundColor3 = Ui.ORANGE,
+		Font = FONT,
+		TextSize = 26,
+		TextColor3 = Ui.WHITE,
+		Text = "?",
+	}, foeRow)
+	round(wheelButton, 21)
 
 	make("TextLabel", {
 		Position = UDim2.fromOffset(15, 120),
@@ -209,7 +234,13 @@ function BattleScreen.init(context: Context)
 	}, panel)
 	round(fightButton, 14)
 
-	-- Сохранённая команда, а если её нет — трое сильнейших, как это сделает сервер
+	-- Этаж, на который игрок пойдёт следующим; nil — открытые этажи кончились
+	local function nextFloor(): Tower.Floor?
+		local number = (context.getState().tower or 0) + 1
+		return if number <= GameData.TOWER_FLOORS_OPEN then Tower.floor(number) else nil
+	end
+
+	-- Сохранённая команда, а если её нет — «Авто» под врагов этажа, как это сделает сервер
 	local function currentTeam(): { string }
 		local state = context.getState()
 		local team = {}
@@ -219,6 +250,10 @@ function BattleScreen.init(context: Context)
 			end
 		end
 		if #team == 0 then
+			local floor = nextFloor()
+			if floor then
+				return BattleRules.autoTeam(state.creatures, floor.enemies, floor.level)
+			end
 			return BattleRules.autoTeam(state.creatures)
 		end
 		return team
@@ -242,7 +277,7 @@ function BattleScreen.init(context: Context)
 		remotes.SetTeam:FireServer(team)
 	end
 
-	local teamCards: { [string]: { button: TextButton, badge: TextLabel } } = {}
+	local teamCards: { [string]: TeamCard } = {}
 	for order, key in GameData.RecipeOrder do
 		local button = make("TextButton", {
 			Name = key,
@@ -251,6 +286,7 @@ function BattleScreen.init(context: Context)
 			Font = FONT,
 			TextSize = 13,
 			TextWrapped = true,
+			RichText = true,
 			TextColor3 = Ui.BROWN,
 			Text = "",
 			Visible = false,
@@ -270,7 +306,18 @@ function BattleScreen.init(context: Context)
 			Visible = false,
 		}, button)
 		round(badge, 11)
-		teamCards[key] = { button = button, badge = badge }
+		-- расклад против врагов этажа: зелёная стрелка — враги удобные, красная — неудобные
+		local sign = make("TextLabel", {
+			Name = "Sign",
+			Position = UDim2.fromOffset(5, 3),
+			Size = UDim2.fromOffset(24, 24),
+			BackgroundTransparency = 1,
+			Font = FONT,
+			TextSize = 22,
+			TextColor3 = Ui.GREEN,
+			Text = "",
+		}, button)
+		teamCards[key] = { button = button, badge = badge, sign = sign }
 		button.Activated:Connect(function()
 			toggleTeam(key)
 		end)
@@ -288,8 +335,8 @@ function BattleScreen.init(context: Context)
 		end
 
 		local number = (state.tower or 0) + 1
-		local open = number <= GameData.TOWER_FLOORS_OPEN
-		local floor = if open then Tower.floor(number) else nil
+		local floor = nextFloor()
+		local open = floor ~= nil
 		panelTitle.Text = if floor
 			then "Торт-башня · этаж " .. number .. (if floor.boss then " · БОСС" else "")
 			else "Торт-башня · все этажи пройдены"
@@ -300,7 +347,7 @@ function BattleScreen.init(context: Context)
 				local giant = floor.boss and index == 1
 				card.Text = string.format(
 					"%s %s%s\nур. %d",
-					typeIcons(key),
+					typeIcons(key, 22, 13),
 					if giant then "Гигант " else "",
 					GameData.Recipes[key].name,
 					floor.level
@@ -318,7 +365,7 @@ function BattleScreen.init(context: Context)
 				local place = table.find(team, key)
 				card.button.Text = string.format(
 					"%s\n%s\nур. %d · сила %s",
-					typeIcons(key),
+					typeIcons(key, 20, 12),
 					GameData.Recipes[key].name,
 					level,
 					Format.number(BattleRules.power(key, level))
@@ -326,6 +373,12 @@ function BattleScreen.init(context: Context)
 				card.button.BackgroundColor3 = if place then Ui.YELLOW else Ui.WHITE
 				card.badge.Visible = place ~= nil
 				card.badge.Text = tostring(place or "")
+				local matchup = if floor then BattleRules.matchup(key, level, floor.enemies, floor.level) else 0
+				card.sign.Text = if matchup >= MATCHUP_SIGN
+					then ARROWS[1]
+					elseif matchup <= -MATCHUP_SIGN then ARROWS[-1]
+					else ""
+				card.sign.TextColor3 = if matchup > 0 then Ui.GREEN else Ui.RED
 			end
 		end
 
@@ -338,10 +391,74 @@ function BattleScreen.init(context: Context)
 		remotes.SetTeam:FireServer({})
 	end)
 
+	-- Колесо типов: кто кого бьёт сильнее. Одна картинка без текста, закрывается нажатием.
+
+	local wheel = make("TextButton", {
+		Name = "TypeWheel",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.47),
+		Size = UDim2.fromOffset(340, 400),
+		BackgroundColor3 = Ui.CREAM,
+		Text = "",
+		AutoButtonColor = false,
+		Visible = false,
+		ZIndex = 10,
+	}, gui)
+	round(wheel, 20)
+	make("UIStroke", { Color = Ui.BROWN, Thickness = 3, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, wheel)
+	local function wheelLabel(position: UDim2, size: number, text: string, color: Color3): TextLabel
+		return make("TextLabel", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = position,
+			Size = UDim2.fromOffset(size * 2, size * 1.4),
+			BackgroundTransparency = 1,
+			Font = FONT,
+			TextSize = size,
+			TextColor3 = color,
+			Text = text,
+			ZIndex = 11,
+		}, wheel)
+	end
+	local typeCount = #GameData.TypeOrder
+	for index, id in GameData.TypeOrder do
+		-- по часовой стрелке, первый тип сверху; стрелка между соседями смотрит на того, кого бьют
+		local angle = math.rad(-90 + (index - 1) * 360 / typeCount)
+		local between = angle + math.rad(180 / typeCount)
+		wheelLabel(
+			UDim2.new(0.5, math.cos(angle) * WHEEL_RADIUS, 0, 150 + math.sin(angle) * WHEEL_RADIUS),
+			40,
+			GameData.IngredientById[id].emoji,
+			Ui.BROWN
+		)
+		local arrow = wheelLabel(
+			UDim2.new(0.5, math.cos(between) * WHEEL_RADIUS, 0, 150 + math.sin(between) * WHEEL_RADIUS),
+			30,
+			ARROWS[1],
+			Ui.GREEN
+		)
+		arrow.Rotation = math.deg(between) + 180
+	end
+	-- образцы: крупный значок — основной тип, по нему две стрелки; мелкий — подтип, одна
+	local sample = GameData.IngredientById[GameData.TypeOrder[2]].emoji
+	wheelLabel(UDim2.new(0.5, -40, 0, 310), 40, sample, Ui.BROWN)
+	wheelLabel(UDim2.new(0.5, 40, 0, 310), 30, ARROWS[2], Ui.GREEN)
+	wheelLabel(UDim2.new(0.5, -40, 0, 362), 22, sample, Ui.BROWN)
+	wheelLabel(UDim2.new(0.5, 40, 0, 362), 30, ARROWS[1], Ui.GREEN)
+	wheel.Activated:Connect(function()
+		wheel.Visible = false
+	end)
+	wheelButton.Activated:Connect(function()
+		wheel.Visible = not wheel.Visible
+	end)
+	panelClose.Activated:Connect(function()
+		wheel.Visible = false
+	end)
+
 	hudButton.Activated:Connect(function()
 		local opening = not panel.Visible
 		context.closePanels()
 		panel.Visible = opening
+		wheel.Visible = false
 		refreshPanel()
 	end)
 
@@ -370,6 +487,7 @@ function BattleScreen.init(context: Context)
 			BackgroundTransparency = 1,
 			Font = FONT,
 			TextSize = 19,
+			RichText = true,
 			TextColor3 = Ui.BROWN,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextTruncate = Enum.TextTruncate.AtEnd,
@@ -475,6 +593,7 @@ function BattleScreen.init(context: Context)
 			BackgroundTransparency = 1,
 			Font = FONT,
 			TextSize = textSize,
+			RichText = true,
 			TextColor3 = Ui.BROWN,
 			Text = "",
 		}, parent)
@@ -509,7 +628,7 @@ function BattleScreen.init(context: Context)
 			icon = buttonText(button, 8, 46, 36),
 			name = buttonText(button, 56, 26, 17),
 			hint = buttonText(button, 82, 20, 14),
-			matchup = buttonText(button, 106, 24, 16),
+			matchup = buttonText(button, 102, 32, 16),
 			shade = shade,
 		}
 	end
@@ -606,7 +725,8 @@ function BattleScreen.init(context: Context)
 	local function showCard(card: CardView, side: SideView, other: SideView)
 		local fighter = side.team[side.active]
 		local rival = other.team[other.active]
-		card.name.Text = string.format("%s %s · ур. %d", typeIcons(fighter.key), fighterName(fighter), fighter.level)
+		card.name.Text =
+			string.format("%s %s · ур. %d", typeIcons(fighter.key, 22, 13), fighterName(fighter), fighter.level)
 		setHp(card, fighter.hp, fighter.hpMax, false)
 
 		local notes = {}
@@ -652,10 +772,11 @@ function BattleScreen.init(context: Context)
 				view.shade.Visible = false
 				if fighter then
 					view.button.BackgroundColor3 = Ui.WHITE
-					view.icon.Text = typeIcons(fighter.key)
+					view.icon.Text = typeIcons(fighter.key, 36, 20)
 					view.name.Text = GameData.Recipes[fighter.key].name
 					view.hint.Text = "ур. " .. fighter.level
 					view.matchup.Text = Format.number(fighter.hp) .. " / " .. Format.number(fighter.hpMax)
+					view.matchup.TextSize = 16
 					view.matchup.TextColor3 = Ui.BROWN
 				end
 			end
@@ -678,15 +799,14 @@ function BattleScreen.init(context: Context)
 			end
 			local skill = GameData.Skills[skillId]
 			local wait = fighter.cooldown[skillId] or 0
-			local _, matchup = BattleRules.typeMultiplier(skill.type, rival.key)
+			-- стрелки — готовый итог по обоим типам соперника: «жми, где больше зелёных»
+			local _, arrows = BattleRules.typeMultiplier(skill.type, rival.key)
 			view.icon.Text = if skill.type then GameData.IngredientById[skill.type].emoji else "Кусь"
 			view.name.Text = if skill.type then skill.name else ""
 			view.hint.Text = skill.hint
-			view.matchup.Text = if matchup == "strong"
-				then "▲ сильно"
-				elseif matchup == "weak" then "▼ слабо"
-				else ""
-			view.matchup.TextColor3 = if matchup == "strong" then Ui.GREEN else Ui.RED
+			view.matchup.Text = ARROWS[arrows] or ""
+			view.matchup.TextSize = 30
+			view.matchup.TextColor3 = if arrows > 0 then Ui.GREEN else Ui.RED
 			view.shade.Visible = wait > 0
 			view.shade.Text = tostring(wait)
 			view.button.BackgroundColor3 = if chosen == skillId
@@ -756,10 +876,9 @@ function BattleScreen.init(context: Context)
 				if event.crit then
 					text ..= "  Крит!"
 				end
-				if event.matchup == "strong" then
-					text ..= "  Сильно!"
-				elseif event.matchup == "weak" then
-					text ..= "  Слабо…"
+				local word = GameData.MatchupWords[event.matchup or 0]
+				if word then
+					text ..= "  " .. word
 				end
 				float(targetCard, text, if event.crit then Ui.YELLOW else Ui.WHITE, 0)
 				if event.shielded then
@@ -855,6 +974,7 @@ function BattleScreen.init(context: Context)
 		battleId = message.id
 		chosen = nil
 		panel.Visible = false
+		wheel.Visible = false
 		context.closePanels()
 		setHud(false)
 		resultPanel.Visible = false
@@ -1048,6 +1168,7 @@ function BattleScreen.init(context: Context)
 	BattleScreen.refresh = refreshPanel
 	BattleScreen.closePanel = function()
 		panel.Visible = false
+		wheel.Visible = false
 	end
 end
 

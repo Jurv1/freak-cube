@@ -40,14 +40,24 @@ GameData.SECOND_SKILL_LEVEL = 5
 GameData.BATTLE_UNLOCK_CREATURES = 4 -- кнопка «Бой» появляется при стольких зверьках
 GameData.TOWER_FLOORS_OPEN = 10 -- сколько этажей башни уже можно пройти
 GameData.ARENA_MULT = 4.4 -- общий множитель статов на арене: там уровень не действует
+GameData.TIER_GROWTH = 0.12 -- насколько сила рецепта растит статы: стартовые 1.0, самый дорогой 1.46
+GameData.LEVEL_GROWTH = 0.08 -- прибавка к здоровью и силе за уровень
+-- Враги башни: величина их статов зависит только от номера этажа, рецепт задаёт форму
+GameData.TOWER_FLOOR_SCALE = 0.88
+GameData.TOWER_BOSS_SCALE = 0.9
+GameData.TOWER_GIANT_HP = 1.5 -- здоровье первого врага на этаже-боссе
+GameData.TOWER_HARDENING = 0 -- прибавка врагам за этаж в ответ на прокачку; включается вместе с Миксером
 GameData.Battle = {
 	roundLimit = 15,
 	missedLimit = 3, -- столько пропущенных выборов подряд — техническое поражение
 	critChance = 0.1,
 	critMultiplier = 1.5,
+	-- типовой множитель считается по основному типу цели и по подтипу, результаты перемножаются
 	strongMultiplier = 1.5,
 	weakMultiplier = 2 / 3,
-	shieldMultiplier = 0.5,
+	subStrongMultiplier = 1.25,
+	subWeakMultiplier = 0.8,
+	shieldMultiplier = 0.6,
 	healShare = 0.5,
 	-- длительности фаз, секунды: по ним идёт и сервер, и анимация клиента
 	introTime = 2,
@@ -58,15 +68,17 @@ GameData.Battle = {
 	roundPad = 0.4,
 }
 
--- Тип бьёт сильнее тот, на который указывает: радуга → лёд → шоколад → клубника → сыр → мука → радуга
-GameData.TypeBeats = {
-	rainbow = "ice",
-	ice = "chocolate",
-	chocolate = "strawberry",
-	strawberry = "cheese",
-	cheese = "flour",
-	flour = "rainbow",
-} :: { [string]: string }
+-- Круг типов: каждый бьёт сильнее следующего, последний — первого.
+-- Тип — это ингредиент: у зверька два типа, основной и подтип (BattleRules.types).
+GameData.TypeOrder = { "rainbow", "ice", "chocolate", "strawberry", "cheese", "flour" }
+
+-- Слово при ударе по числу стрелок на кнопке скилла: от −2 до 2
+GameData.MatchupWords = {
+	[2] = "Очень сильно!",
+	[1] = "Сильно!",
+	[-1] = "Слабо…",
+	[-2] = "Совсем слабо…",
+} :: { [number]: string }
 
 -- У зверька три кнопки: «Кусь» и по скиллу от каждого ингредиента (id скилла = id ингредиента)
 GameData.Skills = {
@@ -93,7 +105,7 @@ GameData.Skills = {
 		id = "cheese",
 		name = "Липкий сыр",
 		type = "cheese",
-		power = 120,
+		power = 115,
 		cooldown = 2,
 		effect = "slow",
 		hint = "замедляет",
@@ -102,7 +114,7 @@ GameData.Skills = {
 		id = "chocolate",
 		name = "Шоко-бомба",
 		type = "chocolate",
-		power = 180,
+		power = 150,
 		cooldown = 3,
 		hint = "сильный удар",
 	},
@@ -110,7 +122,7 @@ GameData.Skills = {
 		id = "rainbow",
 		name = "Радужный луч",
 		type = "rainbow",
-		power = 130,
+		power = 120,
 		cooldown = 2,
 		effect = "first",
 		hint = "бьёт первым",
@@ -143,12 +155,12 @@ GameData.OvenTiers = {
 -- power задаёт и доход зверька, и время выпечки.
 -- hp, atk, spd — боевой профиль: базовые статы зверька — сумма профилей двух его ингредиентов.
 GameData.Ingredients = {
-	{ id = "flour", name = "Мука", emoji = "🌾", price = 0, power = 1, hp = 130, atk = 23, spd = 12 },
-	{ id = "strawberry", name = "Клубника", emoji = "🍓", price = 0, power = 1, hp = 90, atk = 25, spd = 27 },
-	{ id = "cheese", name = "Сыр", emoji = "🧀", price = 0, power = 1, hp = 110, atk = 26, spd = 18 },
-	{ id = "chocolate", name = "Шоколад", emoji = "🍫", price = 50, power = 3, hp = 95, atk = 31, spd = 15 },
-	{ id = "rainbow", name = "Радуга", emoji = "🌈", price = 300, power = 8, hp = 95, atk = 24, spd = 31 },
-	{ id = "ice", name = "Лёд", emoji = "🧊", price = 1500, power = 20, hp = 115, atk = 24, spd = 20 },
+	{ id = "flour", name = "Мука", emoji = "🌾", price = 0, power = 1, hp = 104, atk = 26, spd = 12 },
+	{ id = "strawberry", name = "Клубника", emoji = "🍓", price = 0, power = 1, hp = 89, atk = 27, spd = 27 },
+	{ id = "cheese", name = "Сыр", emoji = "🧀", price = 0, power = 1, hp = 92, atk = 27, spd = 18 },
+	{ id = "chocolate", name = "Шоколад", emoji = "🍫", price = 50, power = 3, hp = 77, atk = 32, spd = 15 },
+	{ id = "rainbow", name = "Радуга", emoji = "🌈", price = 300, power = 8, hp = 83, atk = 28, spd = 31 },
+	{ id = "ice", name = "Лёд", emoji = "🧊", price = 1500, power = 20, hp = 86, atk = 26, spd = 20 },
 } :: { Ingredient }
 
 GameData.IngredientById = {} :: { [string]: Ingredient }

@@ -74,8 +74,8 @@ local function allowRemote(player: Player): boolean
 	return true
 end
 
--- Команда игрока на бой: сохранённая, а если её нет — трое сильнейших
-local function teamOf(profile: Saves.Profile): { string }
+-- Команда игрока на бой: сохранённая, а если её нет — «Авто» под врагов этажа
+local function teamOf(profile: Saves.Profile, floor: Tower.Floor): { string }
 	local keys = {}
 	for _, key in profile.team do
 		if profile.creatures[key] and not table.find(keys, key) and #keys < GameData.TEAM_SIZE then
@@ -83,7 +83,7 @@ local function teamOf(profile: Saves.Profile): { string }
 		end
 	end
 	if #keys == 0 then
-		return BattleRules.autoTeam(profile.creatures)
+		return BattleRules.autoTeam(profile.creatures, floor.enemies, floor.level)
 	end
 	return keys
 end
@@ -152,10 +152,9 @@ local function playOnRing(session: Session, events: { BattleEngine.Event })
 			if event.crit then
 				text ..= " Крит!"
 			end
-			if event.matchup == "strong" then
-				text ..= " Сильно!"
-			elseif event.matchup == "weak" then
-				text ..= " Слабо…"
+			local word = GameData.MatchupWords[event.matchup or 0]
+			if word then
+				text ..= " " .. word
 			end
 			Ring.note(session.ring, other, text, if event.crit then NOTE_YELLOW else NOTE_WHITE)
 			Ring.setHp(session.ring, other, event.targetHp or 0, target.hpMax)
@@ -296,7 +295,8 @@ local function startTower(player: Player)
 	if number > GameData.TOWER_FLOORS_OPEN then
 		return
 	end
-	local keys = teamOf(profile)
+	local floor = Tower.floor(number)
+	local keys = teamOf(profile, floor)
 	if #keys == 0 then
 		return
 	end
@@ -305,7 +305,6 @@ local function startTower(player: Player)
 	for index, key in keys do
 		team[index] = BattleEngine.towerFighter(key, profile.creatures[key])
 	end
-	local floor = Tower.floor(number)
 	local battle = BattleEngine.new(team, BattleEngine.towerEnemies(floor))
 	local ring = Ring.open(plot, plotIndex)
 	Ring.place(ring, 1, BattleEngine.active(battle, 1))

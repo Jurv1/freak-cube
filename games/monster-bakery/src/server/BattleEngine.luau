@@ -14,6 +14,14 @@ local RULES = GameData.Battle
 local SHIELD_ROUNDS = 2 -- до конца следующего раунда
 local SLOW_ROUNDS = 3 -- два следующих раунда
 local FREEZE_IMMUNE_ROUNDS = 3 -- два раунда после пропущенного хода
+-- Сколько бот даёт за эффект скилла сверх его урона, в процентах силы
+local BOT_SHIELD = 40
+local BOT_SLOW = 20
+local BOT_FIRST = 15
+local BOT_FREEZE = 60
+local BOT_FINISHER = 1000 -- удар, который добивает наверняка, важнее всего остального
+local BOT_HEAL_BELOW = 0.85 -- лечиться есть смысл, только когда здоровье уже потрачено
+local WORST_SPREAD = 0.9
 
 export type Fighter = {
 	key: string,
@@ -41,7 +49,7 @@ export type Event = {
 	skill: string?,
 	damage: number?,
 	crit: boolean?,
-	matchup: string?, -- "strong" | "weak"
+	matchup: number?, -- число стрелок: от −2 («совсем слабо») до 2 («очень сильно»)
 	shielded: boolean?,
 	heal: number?,
 	applied: string?, -- "shield" | "slow" | "freeze"
@@ -82,17 +90,13 @@ function BattleEngine.arenaFighter(key: string): Fighter
 	return newFighter(key, 1, hp, atk, spd, BattleRules.skillsOf(key, 1, true))
 end
 
+-- Враги этажа: форма статов — от рецепта, величина — от номера этажа
 function BattleEngine.towerEnemies(floor: Tower.Floor): { Fighter }
 	local team = {}
 	for index, key in floor.enemies do
-		local fighter = BattleEngine.towerFighter(key, floor.level)
-		fighter.hpMax = math.floor(fighter.hpMax * floor.scale + 0.5)
-		fighter.atk = math.floor(fighter.atk * floor.scale + 0.5)
-		if floor.boss and index == 1 then
-			fighter.giant = true
-			fighter.hpMax *= 2
-		end
-		fighter.hp = fighter.hpMax
+		local hp, atk, spd = Tower.enemyStats(floor, index)
+		local fighter = newFighter(key, floor.level, hp, atk, spd, BattleRules.skillsOf(key, floor.level, false))
+		fighter.giant = floor.boss and index == 1
 		team[index] = fighter
 	end
 	return team
@@ -144,6 +148,10 @@ local function healthShare(side: Side): number
 	return hp / hpMax
 end
 
+local function speedNow(fighter: Fighter): number
+	return if fighter.slow > 0 then fighter.spd * 0.5 else fighter.spd
+end
+
 -- Кто ходит первым: «Радужный луч», затем скорость с учётом замедления, при равенстве — жребий
 local function firstToAct(battle: Battle, choices: { string? }, rng: Random): number
 	local priority, speed = {}, {}
@@ -152,7 +160,7 @@ local function firstToAct(battle: Battle, choices: { string? }, rng: Random): nu
 		local skillId = choices[sideIndex]
 		local skill = if skillId then GameData.Skills[skillId] else nil
 		priority[sideIndex] = if skill and skill.effect == "first" and not fighter.frozen then 1 else 0
-		speed[sideIndex] = if fighter.slow > 0 then fighter.spd * 0.5 else fighter.spd
+		speed[sideIndex] = speedNow(fighter)
 	end
 	if priority[1] ~= priority[2] then
 		return if priority[1] > priority[2] then 1 else 2
@@ -312,13 +320,42 @@ function BattleEngine.replace(battle: Battle, sideIndex: number, index: number?)
 	side.active = index :: number
 end
 
--- Насколько хорош скилл против соперника на поле: сила, умноженная на типовой множитель
-local function skillValue(skillId: string, targetKey: string): number
+-- Ценность хода для бота: урон в процентах силы с типовым множителем и надбавка за эффект, если он сейчас сработает.
+-- Без надбавок бот никогда не морозит и не ставит щит: по одной силе эти скиллы проигрывают «Кусю».
+local function skillValue(actor: Fighter, target: Fighter, skillId: string): number
 	local skill = GameData.Skills[skillId]
-	return skill.power * BattleRules.typeMultiplier(skill.type, targetKey)
+	local hit = skill.power * BattleRules.typeMultiplier(skill.type, target.key)
+	local value = hit
+	local targetFaster = speedNow(target) > speedNow(actor)
+	if skill.effect == "shield" then
+		if actor.shield == 0 then
+			value += BOT_SHIELD
+		end
+	elseif skill.effect == "heal" then
+		if actor.hp < actor.hpMax * BOT_HEAL_BELOW then
+			value += hit * RULES.healShare
+		end
+	elseif skill.effect == "slow" then
+		if target.slow == 0 and targetFaster then
+			value += BOT_SLOW
+		end
+	elseif skill.effect == "first" then
+		if targetFaster then
+			value += BOT_FIRST
+		end
+	elseif skill.effect == "freeze" then
+		if not target.frozen and target.freezeImmune == 0 then
+			value += BOT_FREEZE
+		end
+	end
+	local shield = if target.shield > 0 then RULES.shieldMultiplier else 1
+	if math.floor(actor.atk * hit / 100 * shield * WORST_SPREAD) >= target.hp then
+		value += BOT_FINISHER
+	end
+	return value
 end
 
--- Бот берёт лучший по силе и типу скилл; с вероятностью randomChance — случайный из доступных
+-- Бот берёт самый ценный ход; с вероятностью randomChance — случайный из доступных
 function BattleEngine.botChoice(battle: Battle, sideIndex: number, randomChance: number, rng: Random): string?
 	local actor = BattleEngine.active(battle, sideIndex)
 	if actor.frozen then
@@ -328,10 +365,10 @@ function BattleEngine.botChoice(battle: Battle, sideIndex: number, randomChance:
 	if rng:NextNumber() < randomChance then
 		return options[rng:NextInteger(1, #options)]
 	end
-	local targetKey = BattleEngine.active(battle, 3 - sideIndex).key
+	local target = BattleEngine.active(battle, 3 - sideIndex)
 	local best, bestValue = options[1], -1
 	for _, skillId in options do
-		local value = skillValue(skillId, targetKey)
+		local value = skillValue(actor, target, skillId)
 		if value > bestValue then
 			best, bestValue = skillId, value
 		end
@@ -339,7 +376,7 @@ function BattleEngine.botChoice(battle: Battle, sideIndex: number, randomChance:
 	return best
 end
 
--- Кого бот выпускает после нокаута: следующего по порядку, а «умный» — того, чей скилл лучше ложится на соперника
+-- Кого бот выпускает после нокаута: следующего по порядку, а «умный» — того, чей скилл лучше ложится на соперника по типу
 function BattleEngine.botReplacement(battle: Battle, sideIndex: number, smart: boolean): number
 	local reserves = BattleEngine.reserves(battle, sideIndex)
 	if not smart then
@@ -348,12 +385,9 @@ function BattleEngine.botReplacement(battle: Battle, sideIndex: number, smart: b
 	local targetKey = BattleEngine.active(battle, 3 - sideIndex).key
 	local best, bestValue = reserves[1], -1
 	for _, index in reserves do
-		local fighter = battle.sides[sideIndex].team[index]
-		for _, skillId in fighter.skills do
-			local value = skillValue(skillId, targetKey)
-			if value > bestValue then
-				best, bestValue = index, value
-			end
+		local value = BattleRules.bestMultiplier(battle.sides[sideIndex].team[index].skills, targetKey)
+		if value > bestValue then
+			best, bestValue = index, value
 		end
 	end
 	return best
